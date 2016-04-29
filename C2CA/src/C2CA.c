@@ -35,34 +35,17 @@
 uint8_t out_buffer[BUFFER_SIZE];
 uint8_t in_buffer[BUFFER_SIZE];
 
-volatile int pwmCnt_Ch0 = 0;
-volatile int pwmCnt_Ch1 = 10;
-volatile int pwmCnt_Ch2 = 20;
-volatile int pwmCnt_Ch3 = 30;
-volatile int pwmCh0 = 0;
-volatile int pwmCh1 = 0;
-volatile int pwmCh2 = 0;
-volatile int pwmCh3 = 0;
-volatile bool heaterEnableCh0 = false;
-volatile bool heaterEnableCh1 = false;
-volatile bool heaterEnableCh2 = false;
-volatile bool heaterEnableCh3 = false;
-
-volatile float TempSensor0 = 0;
-volatile float TempSensor1 = 0;
-volatile float TempSensor2 = 0;
-volatile float TempSensor3 = 0;
-
 #define errorHistory	10
 const int Dfilter = errorHistory;
 volatile int CtrlErrorIdx = 0;
 volatile int CtrlErrorHistIdx = 1;
 
-struct channel {
+typedef struct channel {
 volatile float TempSetPoint;
-volatile float P;
-volatile float I;
-volatile float D;
+volatile float TempSensor;
+volatile float P_err;
+volatile float I_err;
+volatile float D_err;
 volatile float Control;
 volatile float Control_PID;
 volatile float Pgain;
@@ -72,58 +55,16 @@ volatile float TempError[errorHistory + 1];
 volatile float tempErrorWin;
 volatile int tempSettleCnt;
 volatile int tempSettleTime;
-volatile int tempStable;	
-	};
+volatile int tempStable;
+volatile int pwmCnt;
+volatile int pwm;
+volatile bool heaterEnable;	
+	} channel;
 	
 struct channel ch0;
-
-volatile float TempSetPoint0 = 0;
-volatile float P_ch0 = 0;
-volatile float I_ch0 = 0;
-volatile float D_ch0 = 0;
-volatile float Control_ch0 = 0;
-volatile float Control_ch0_PID = 0;
-volatile float Pgain_ch0;
-volatile float Igain_ch0;
-volatile float Dgain_ch0;
-volatile float TempError0[errorHistory + 1];
-volatile float tempErrorWinCh0;
-volatile int tempSettleCntCh0;
-volatile int tempSettleTimeCh0;
-volatile int tempStableCh0;
-
-volatile float TempSetPoint1 = 0;
-volatile float P_ch1 = 0;
-volatile float I_ch1 = 0;
-volatile float D_ch1 = 0;
-volatile float Control_ch1 = 0;
-volatile float Control_ch1_PID = 0;
-volatile float Pgain_ch1;
-volatile float Igain_ch1;
-volatile float Dgain_ch1;
-volatile float TempError1[errorHistory + 1];
-
-volatile float TempSetPoint2 = 0;
-volatile float P_ch2 = 0;
-volatile float I_ch2 = 0;
-volatile float D_ch2 = 0;
-volatile float Control_ch2 = 0;
-volatile float Control_ch2_PID = 0;
-volatile float Pgain_ch2;
-volatile float Igain_ch2;
-volatile float Dgain_ch2;
-volatile float TempError2[errorHistory + 1];
-
-volatile float TempSetPoint3 = 0;
-volatile float P_ch3 = 0;
-volatile float I_ch3 = 0;
-volatile float D_ch3 = 0;
-volatile float Control_ch3 = 0;
-volatile float Control_ch3_PID = 0;
-volatile float Pgain_ch3;
-volatile float Igain_ch3;
-volatile float Dgain_ch3;
-volatile float TempError3[errorHistory + 1];
+struct channel ch1;
+struct channel ch2;
+struct channel ch3;
 
 const int eepromAdr_TempSetPoint0	= 0;
 const int eepromAdr_PgainCh0		= 4;
@@ -163,6 +104,7 @@ static inline int GenCrc16(char c[], int nByte);
 static inline bool CrcCompare(char *crc_in, char *crc_calc);
 static inline void ReadParmEEPROM(void);
 static inline void WriteParamToEEPROM(void);
+static inline void PIDctrl(channel *ch, int tempSensor);
 
 struct ring_buffer ring_buffer_out;		//! ring buffer to use for the UART transmission
 struct ring_buffer ring_buffer_in;		//! ring buffer to use for the UART reception
@@ -291,10 +233,10 @@ static inline void TimerInit(void)
 	sei();
 }
 
-ISR(TIMER0_COMPA_vect)	// PWM output
+ISR(TIMER0_COMPA_vect)	// PWM output Irq
 {
-	pwmCnt_Ch0++;
-	if(pwmCnt_Ch0 < pwmCh0 )
+	ch0.pwmCnt++;
+	if(ch0.pwmCnt < ch0.pwm )
 	{
 		SetHeaterOutputON(0);
 	}
@@ -302,13 +244,13 @@ ISR(TIMER0_COMPA_vect)	// PWM output
 	{
 		PORTC &= 0b11111110;
 	}
-	if(pwmCnt_Ch0 >= 100)
+	if(ch0.pwmCnt >= 100)
 	{
-		pwmCnt_Ch0 = 0;
+		ch0.pwmCnt = 0;
 	}
 	
-	pwmCnt_Ch1++;
-	if(pwmCnt_Ch1 < pwmCh1 )
+	ch1.pwmCnt++;
+	if(ch1.pwmCnt < ch1.pwm )
 	{
 		SetHeaterOutputON(1);
 	}
@@ -316,13 +258,13 @@ ISR(TIMER0_COMPA_vect)	// PWM output
 	{
 		PORTC &= 0b11111101;
 	}
-	if(pwmCnt_Ch1 >= 100)
+	if(ch1.pwmCnt >= 100)
 	{
-		pwmCnt_Ch1 = 0;
+		ch1.pwmCnt = 0;
 	}
 	
-	pwmCnt_Ch2++;
-	if(pwmCnt_Ch2 < pwmCh2 )
+	ch2.pwmCnt++;
+	if(ch2.pwmCnt < ch2.pwm )
 	{
 		SetHeaterOutputON(2);
 	}
@@ -330,13 +272,13 @@ ISR(TIMER0_COMPA_vect)	// PWM output
 	{
 		PORTC &= 0b11111011;
 	}
-	if(pwmCnt_Ch2 >= 100)
+	if(ch2.pwmCnt >= 100)
 	{
-		pwmCnt_Ch2 = 0;
+		ch2.pwmCnt = 0;
 	}
 	
-	pwmCnt_Ch3++;
-	if(pwmCnt_Ch3 < pwmCh3 )
+	ch3.pwmCnt++;
+	if(ch3.pwmCnt < ch3.pwm )
 	{
 		SetHeaterOutputON(3);
 	}
@@ -344,164 +286,22 @@ ISR(TIMER0_COMPA_vect)	// PWM output
 	{
 		PORTC &= 0b11110111;
 	}
-	if(pwmCnt_Ch3 >= 100)
+	if(ch3.pwmCnt >= 100)
 	{
-		pwmCnt_Ch3 = 0;
+		ch3.pwmCnt = 0;
 	}
 
 }
 
-ISR(TIMER2_COMPA_vect)	// PID Controller
+ISR(TIMER2_COMPA_vect)	// PID Controller Irq
 {
 	sei();	// Enable nested interrupt
 	PORTD |= statusLed;
 	
-	TempSensor0 = ReadTempSensor(1);
-	if(TempSensor0 > (float)maxAllowedTemp)					// Max temperature limit
-	{
-		heaterEnableCh0 = false;
-		PORTC &= allHeaterOff;
-	}
-
-	TempError0[CtrlErrorIdx] = TempSetPoint0 - TempSensor0;			// Control error
-	
-	P_ch0 = TempError0[CtrlErrorIdx] * Pgain_ch0;					// P error
-	I_ch0 = I_ch0 + (TempError0[CtrlErrorIdx] * Igain_ch0);			// I error
-	if(I_ch0 > integralErrorLimit)
-	{
-	I_ch0 = integralErrorLimit;
-	}
-	if(I_ch0 < -integralErrorLimit)
-	{
-	I_ch0 = -integralErrorLimit;
-	}
-	
-	D_ch0 = (TempError0[CtrlErrorIdx] - TempError0[CtrlErrorHistIdx]) * Dgain_ch0; // D error
-	
-	Control_ch0_PID = P_ch0 + I_ch0 + D_ch0;
-	Control_ch0 = Control_ch0_PID + TempSetPoint0 * (float)0.21 - 5;
-	pwmCh0 = (round(Control_ch0));
-	
-	if(abs(TempError0[0]) > integralErrorActiveWindow)
-	{
-	I_ch0 = 0;									// Avoid integral wind-up
-	}
-	
-	if(abs(TempError0[0]) <= tempErrorWinCh0)
-	{
-		tempSettleCntCh0 ++;
-	}
-	else
-	{
-		tempSettleCntCh0 = 0;
-	}
-	if(tempSettleCntCh0 >= tempSettleTimeCh0)
-	{
-		tempStableCh0 = 1;
-	}
-	else
-	{
-		tempStableCh0 = 0;
-	}
-	
-	//*** Channel 1 ***
-	TempSensor1 = ReadTempSensor(2);
-		
-	if(TempSensor1 > (float)maxAllowedTemp)					// Max temperature limit
-	{
-		heaterEnableCh1 = false;
-		PORTC &= allHeaterOff;
-	}
-
-	TempError1[CtrlErrorIdx] = TempSetPoint1 - TempSensor1;			// Control error
-	
-	P_ch1 = TempError1[CtrlErrorIdx] * Pgain_ch1;					// P error
-	I_ch1 = I_ch1 + (TempError1[CtrlErrorIdx] * Igain_ch1);			// I error
-	if(I_ch1 > integralErrorLimit)
-	{
-		I_ch1 = integralErrorLimit;
-	}
-	if(I_ch1 < -integralErrorLimit)
-	{
-		I_ch1 = -integralErrorLimit;
-	}
-	
-	D_ch1 = (TempError1[CtrlErrorIdx] - TempError1[CtrlErrorHistIdx]) * Dgain_ch1; // D error
-	
-	Control_ch1_PID = P_ch1 + I_ch1 + D_ch1;
-	Control_ch1 = Control_ch1_PID + TempSetPoint1 * (float)0.21 - 5;
-	pwmCh1 = (round(Control_ch1));
-	
-	if(abs(TempError1[0]) > integralErrorActiveWindow)
-	{
-		I_ch1 = 0;									// Avoid integral wind-up
-	}
-	
-	// *** Channel 2 ***
-	TempSensor2 = ReadTempSensor(3);
-	
-	if(TempSensor2 > (float)maxAllowedTemp)					// Max temperature limit
-	{
-		heaterEnableCh2 = false;
-		PORTC &= allHeaterOff;
-	}
-	
-	TempError2[CtrlErrorIdx] = TempSetPoint2 - TempSensor2;			// Control error
-		
-	P_ch2 = TempError2[CtrlErrorIdx] * Pgain_ch2;					// P error
-	I_ch2 = I_ch2 + (TempError2[CtrlErrorIdx] * Igain_ch2);			// I error
-	if(I_ch2 > integralErrorLimit)
-	{
-		I_ch2 = integralErrorLimit;
-	}
-	if(I_ch2 < -integralErrorLimit)
-	{
-		I_ch2 = -integralErrorLimit;
-	}
-		
-	D_ch2 = (TempError2[CtrlErrorIdx] - TempError2[CtrlErrorHistIdx]) * Dgain_ch2; // D error
-		
-	Control_ch2_PID = P_ch2 + I_ch2 + D_ch2;
-	Control_ch2 = Control_ch2_PID + TempSetPoint2 * (float)0.21 - 5;
-	pwmCh2 = (round(Control_ch2));
-		
-	if(abs(TempError2[0]) > integralErrorActiveWindow)
-	{
-		I_ch2 = 0;									// Avoid integral wind-up
-	}
-
-	// *** Channel 3 ***
-	TempSensor3 = ReadTempSensor(4);
-	
-	if(TempSensor3 > (float)maxAllowedTemp)					// Max temperature limit
-	{
-		heaterEnableCh3 = false;
-		PORTC &= allHeaterOff;
-	}
-	
-	TempError3[CtrlErrorIdx] = TempSetPoint3 - TempSensor3;			// Control error
-	
-	P_ch3 = TempError3[CtrlErrorIdx] * Pgain_ch3;					// P error
-	I_ch3 = I_ch3 + (TempError3[CtrlErrorIdx] * Igain_ch3);			// I error
-	if(I_ch3 > integralErrorLimit)
-	{
-		I_ch3 = integralErrorLimit;
-	}
-	if(I_ch3 < -integralErrorLimit)
-	{
-		I_ch3 = -integralErrorLimit;
-	}
-	
-	D_ch3 = (TempError3[CtrlErrorIdx] - TempError3[CtrlErrorHistIdx]) * Dgain_ch3; // D error
-	
-	Control_ch3_PID = P_ch3 + I_ch3 + D_ch3;
-	Control_ch3 = Control_ch3_PID + TempSetPoint3 * (float)0.21 - 5;
-	pwmCh3 = (round(Control_ch3));
-	
-	if(abs(TempError3[0]) > integralErrorActiveWindow)
-	{
-		I_ch3 = 0;									// Avoid integral wind-up
-	}	
+	PIDctrl(&ch0, 1);
+	PIDctrl(&ch1, 2);
+	PIDctrl(&ch2, 3);
+	PIDctrl(&ch3, 4);
 
 	CtrlErrorIdx ++;							// Control error ring buffer index
 	if(CtrlErrorIdx > errorHistory)
@@ -514,7 +314,58 @@ ISR(TIMER2_COMPA_vect)	// PID Controller
 		CtrlErrorHistIdx = 0;
 	}		
 
-	PORTD &= 0b11110111;						// Turn off LED on PCB (irq call freq: 16MHz / 1024 / 255 = 61.3 Hz )
+	PORTD &= 0b11110111;						// Turn off LED on PCB (Irq call freq: 16MHz / 1024 / 255 = 61.3 Hz )
+}
+
+static inline void PIDctrl(channel *ch, int tempSensor)
+{
+	ch->TempSensor = ReadTempSensor(tempSensor);
+	if(ch->TempSensor > (float)maxAllowedTemp)								// Max temperature limit
+	{
+		ch->heaterEnable = false;
+		PORTC &= allHeaterOff;
+	}
+
+	ch->TempError[CtrlErrorIdx] = ch->TempSetPoint - ch->TempSensor;		// Control error
+	
+	ch->P_err = ch->TempError[CtrlErrorIdx] * ch->Pgain;					// P error
+	ch->I_err = ch->I_err + (ch->TempError[CtrlErrorIdx] * ch->Igain);		// I error
+	if(ch->I_err > integralErrorLimit)
+	{
+		ch->I_err = integralErrorLimit;
+	}
+	if(ch->I_err < -integralErrorLimit)
+	{
+		ch->I_err = -integralErrorLimit;
+	}
+	
+	ch->D_err = (ch->TempError[CtrlErrorIdx] - ch->TempError[CtrlErrorHistIdx]) * ch->Dgain; // D error
+	
+	ch->Control_PID = ch->P_err + ch->I_err + ch->D_err;
+	ch->Control = ch->Control_PID + ch->TempSetPoint * (float)0.21 - 5;
+	ch->pwm = (round(ch->Control));
+	
+	if(abs(ch->TempError[0]) > integralErrorActiveWindow)
+	{
+		ch->I_err = 0;														// Avoid integral wind-up
+	}
+	
+	if(abs(ch->TempError[0]) <= ch->tempErrorWin)							// Temperature settlement
+	{
+		ch->tempSettleCnt ++;
+	}
+	else
+	{
+		ch->tempSettleCnt = 0;
+	}
+	if(ch->tempSettleCnt >= ch->tempSettleTime)
+	{
+		ch->tempStable = 1;
+	}
+	else
+	{
+		ch->tempStable = 0;
+	}	
 }
 
 static inline void SetHeaterOutputON(uint8_t ch)
@@ -522,28 +373,28 @@ static inline void SetHeaterOutputON(uint8_t ch)
 	switch (ch)
 	{
 		case 0:
-			if(heaterEnableCh0)
+			if(ch0.heaterEnable)
 			{
 				PORTC |= 0b00000001;
 			}
 			break;
 	
 		case 1:
-			if(heaterEnableCh1)
+			if(ch1.heaterEnable)
 			{
 				PORTC |= 0b00000010;	
 			}
 			break;
 
 		case 2:
-			if(heaterEnableCh2)
+			if(ch2.heaterEnable)
 			{
 				PORTC |= 0b00000100;
 			}
 			break;
 
 		case 3:
-			if(heaterEnableCh3)
+			if(ch3.heaterEnable)
 			{
 				PORTC |= 0b00001000;	
 			}
@@ -774,48 +625,48 @@ static inline void StepperCV(int step, bool direction)
 
 static inline void ReadParmEEPROM()
 {
-	TempSetPoint0 = eeprom_read_float((float*)eepromAdr_TempSetPoint0);
-	Pgain_ch0 = eeprom_read_float((float*)eepromAdr_PgainCh0);
-	Igain_ch0 = eeprom_read_float((float*)eepromAdr_IgainCh0);
-	Dgain_ch0 = eeprom_read_float((float*)eepromAdr_DgainCh0);
+	ch0.TempSetPoint = eeprom_read_float((float*)eepromAdr_TempSetPoint0);
+	ch0.Pgain = eeprom_read_float((float*)eepromAdr_PgainCh0);
+	ch0.Igain = eeprom_read_float((float*)eepromAdr_IgainCh0);
+	ch0.Dgain = eeprom_read_float((float*)eepromAdr_DgainCh0);
 	
-	TempSetPoint1 = eeprom_read_float((float*)eepromAdr_TempSetPoint1);
-	Pgain_ch1 = eeprom_read_float((float*)eepromAdr_PgainCh1);
-	Igain_ch1 = eeprom_read_float((float*)eepromAdr_IgainCh1);
-	Dgain_ch1 = eeprom_read_float((float*)eepromAdr_DgainCh1);
+	ch1.TempSetPoint = eeprom_read_float((float*)eepromAdr_TempSetPoint1);
+	ch1.Pgain = eeprom_read_float((float*)eepromAdr_PgainCh1);
+	ch1.Igain = eeprom_read_float((float*)eepromAdr_IgainCh1);
+	ch1.Dgain = eeprom_read_float((float*)eepromAdr_DgainCh1);
 	
-	TempSetPoint2 = eeprom_read_float((float*)eepromAdr_TempSetPoint2);
-	Pgain_ch2 = eeprom_read_float((float*)eepromAdr_PgainCh2);
-	Igain_ch2 = eeprom_read_float((float*)eepromAdr_IgainCh2);
-	Dgain_ch2 = eeprom_read_float((float*)eepromAdr_DgainCh2);
+	ch2.TempSetPoint = eeprom_read_float((float*)eepromAdr_TempSetPoint2);
+	ch2.Pgain = eeprom_read_float((float*)eepromAdr_PgainCh2);
+	ch2.Igain = eeprom_read_float((float*)eepromAdr_IgainCh2);
+	ch2.Dgain = eeprom_read_float((float*)eepromAdr_DgainCh2);
 	
-	TempSetPoint3 = eeprom_read_float((float*)eepromAdr_TempSetPoint3);
-	Pgain_ch3 = eeprom_read_float((float*)eepromAdr_PgainCh3);
-	Igain_ch3 = eeprom_read_float((float*)eepromAdr_IgainCh3);
-	Dgain_ch3 = eeprom_read_float((float*)eepromAdr_DgainCh3);			
+	ch3.TempSetPoint = eeprom_read_float((float*)eepromAdr_TempSetPoint3);
+	ch3.Pgain = eeprom_read_float((float*)eepromAdr_PgainCh3);
+	ch3.Igain = eeprom_read_float((float*)eepromAdr_IgainCh3);
+	ch3.Dgain = eeprom_read_float((float*)eepromAdr_DgainCh3);			
 }
 
 static inline void WriteParamToEEPROM()
 {
-	eeprom_write_float( (float*)eepromAdr_TempSetPoint0, TempSetPoint0 );
-	eeprom_write_float( (float*)eepromAdr_PgainCh0, Pgain_ch0 );
-	eeprom_write_float( (float*)eepromAdr_IgainCh0, Igain_ch0 );
-	eeprom_write_float( (float*)eepromAdr_DgainCh0, Dgain_ch0 );
+	eeprom_write_float( (float*)eepromAdr_TempSetPoint0, ch0.TempSetPoint );
+	eeprom_write_float( (float*)eepromAdr_PgainCh0, ch0.Pgain );
+	eeprom_write_float( (float*)eepromAdr_IgainCh0, ch0.Igain );
+	eeprom_write_float( (float*)eepromAdr_DgainCh0, ch0.Dgain );
 	
-	eeprom_write_float( (float*)eepromAdr_TempSetPoint1, TempSetPoint1 );
-	eeprom_write_float( (float*)eepromAdr_PgainCh1, Pgain_ch1 );
-	eeprom_write_float( (float*)eepromAdr_IgainCh1, Igain_ch1 );
-	eeprom_write_float( (float*)eepromAdr_DgainCh1, Dgain_ch1 );
+	eeprom_write_float( (float*)eepromAdr_TempSetPoint1, ch1.TempSetPoint );
+	eeprom_write_float( (float*)eepromAdr_PgainCh1, ch1.Pgain );
+	eeprom_write_float( (float*)eepromAdr_IgainCh1, ch1.Igain );
+	eeprom_write_float( (float*)eepromAdr_DgainCh1, ch1.Dgain );
 	
-	eeprom_write_float( (float*)eepromAdr_TempSetPoint2, TempSetPoint2 );
-	eeprom_write_float( (float*)eepromAdr_PgainCh2, Pgain_ch2 );
-	eeprom_write_float( (float*)eepromAdr_IgainCh2, Igain_ch2 );
-	eeprom_write_float( (float*)eepromAdr_DgainCh2, Dgain_ch2 );
+	eeprom_write_float( (float*)eepromAdr_TempSetPoint2, ch2.TempSetPoint );
+	eeprom_write_float( (float*)eepromAdr_PgainCh2, ch2.Pgain );
+	eeprom_write_float( (float*)eepromAdr_IgainCh2, ch2.Igain );
+	eeprom_write_float( (float*)eepromAdr_DgainCh2, ch2.Dgain );
 	
-	eeprom_write_float( (float*)eepromAdr_TempSetPoint3, TempSetPoint3 );
-	eeprom_write_float( (float*)eepromAdr_PgainCh3, Pgain_ch3 );
-	eeprom_write_float( (float*)eepromAdr_IgainCh3, Igain_ch3 );
-	eeprom_write_float( (float*)eepromAdr_DgainCh3, Dgain_ch3 );			
+	eeprom_write_float( (float*)eepromAdr_TempSetPoint3, ch3.TempSetPoint );
+	eeprom_write_float( (float*)eepromAdr_PgainCh3, ch3.Pgain );
+	eeprom_write_float( (float*)eepromAdr_IgainCh3, ch3.Igain );
+	eeprom_write_float( (float*)eepromAdr_DgainCh3, ch3.Dgain );			
 }
 
 int main(void)
@@ -832,10 +683,10 @@ int main(void)
 	sei();
 	SPIinit();
 
-	pwmCh0 = 1;
-	pwmCh1 = 1;
-	pwmCh2 = 1;
-	pwmCh3 = 1;
+	ch0.pwm = 1;
+	ch1.pwm = 1;
+	ch2.pwm = 1;
+	ch3.pwm = 1;
 
 	DDRD = 0b11111000;			// 1 = output 0 = input
 	DDRC = 0b00001111;
@@ -965,165 +816,165 @@ static inline void ReadParameter(int id)
 	{
 		// *** Channel 0 ***
 		case 100:	// Send sensor 1 temperature		
-		ftoa(TempSensor0, tx_string);
+		ftoa(ch0.TempSensor, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 101:	// Send P part of PID-controller 1
-		ftoa(P_ch0, tx_string);
+		ftoa(ch0.P_err, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 102:	// Send I part of PID-controller 1
-		ftoa(I_ch0, tx_string);
+		ftoa(ch0.I_err, tx_string);
 		printStatus(tx_string);
 		break;
 				
 		case 103:	// Send D part of PID-controller 1
-		ftoa(D_ch0, tx_string);
+		ftoa(ch0.D_err, tx_string);
 		printStatus(tx_string);
 		break;
 		
-		case 104:	// Send TempSetPoint0
-		ftoa(TempSetPoint0, tx_string);
+		case 104:	// Send ch0.TempSetPoint
+		ftoa(ch0.TempSetPoint, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 105:	// Send Pgain ch0
-		ftoa(Pgain_ch0, tx_string);
+		ftoa(ch0.Pgain, tx_string);
 		printStatus(tx_string);
 		break;								
 		
 		case 106:	// Send Igain ch0
-		ftoa(Igain_ch0, tx_string);
+		ftoa(ch0.Igain, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 107:	// Send Dgain ch0
-		ftoa(Dgain_ch0, tx_string);
+		ftoa(ch0.Dgain, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		// *** Channel 1 ***
 		case 200:	// Send sensor 1 temperature
-		ftoa(TempSensor1, tx_string);
+		ftoa(ch1.TempSensor, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 201:	// Send P part of PID-controller 1
-		ftoa(P_ch1, tx_string);
+		ftoa(ch1.P_err, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 202:	// Send I part of PID-controller 1
-		ftoa(I_ch1, tx_string);
+		ftoa(ch1.I_err, tx_string);
 		printStatus(tx_string);
 		break;
 				
 		case 203:	// Send D part of PID-controller 1
-		ftoa(D_ch1, tx_string);
+		ftoa(ch1.D_err, tx_string);
 		printStatus(tx_string);
 		break;
 		
-		case 204:	// Send TempSetPoint1
-		ftoa(TempSetPoint1, tx_string);
+		case 204:	// Send ch1.TempSetPoint
+		ftoa(ch1.TempSetPoint, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 205:	// Send Pgain ch1
-		ftoa(Pgain_ch1, tx_string);
+		ftoa(ch1.Pgain, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 206:	// Send Igain ch1
-		ftoa(Igain_ch1, tx_string);
+		ftoa(ch1.Igain, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 207:	// Send Dgain ch1
-		ftoa(Dgain_ch1, tx_string);
+		ftoa(ch1.Dgain, tx_string);
 		printStatus(tx_string);
 		break;
 
 		// *** Channel 2 ***		
 		case 300:	// Send sensor 2 temperature
-		ftoa(TempSensor2, tx_string);
+		ftoa(ch2.TempSensor, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 301:	// Send P part of PID-controller 2
-		ftoa(P_ch2, tx_string);
+		ftoa(ch2.P_err, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 302:	// Send I part of PID-controller 2
-		ftoa(I_ch2, tx_string);
+		ftoa(ch2.I_err, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 303:	// Send D part of PID-controller 2
-		ftoa(D_ch2, tx_string);
+		ftoa(ch2.D_err, tx_string);
 		printStatus(tx_string);
 		break;
 		
-		case 304:	// Send TempSetPoint2
-		ftoa(TempSetPoint2, tx_string);
+		case 304:	// Send ch2.TempSetPoint
+		ftoa(ch2.TempSetPoint, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 305:	// Send Pgain ch2
-		ftoa(Pgain_ch2, tx_string);
+		ftoa(ch2.Pgain, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 306:	// Send Igain ch2
-		ftoa(Igain_ch2, tx_string);
+		ftoa(ch2.Igain, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 307:	// Send Dgain ch2
-		ftoa(Dgain_ch2, tx_string);
+		ftoa(ch2.Dgain, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		// *** Channel 3 ***
 		case 400:	// Send sensor 3 temperature
-		ftoa(TempSensor3, tx_string);
+		ftoa(ch3.TempSensor, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 401:	// Send P part of PID-controller 3
-		ftoa(P_ch3, tx_string);
+		ftoa(ch3.P_err, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 402:	// Send I part of PID-controller 3
-		ftoa(I_ch3, tx_string);
+		ftoa(ch3.I_err, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 403:	// Send D part of PID-controller 3
-		ftoa(D_ch3, tx_string);
+		ftoa(ch3.D_err, tx_string);
 		printStatus(tx_string);
 		break;
 		
-		case 404:	// Send TempSetPoint3
-		ftoa(TempSetPoint3, tx_string);
+		case 404:	// Send ch3.TempSetPoint
+		ftoa(ch3.TempSetPoint, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 405:	// Send Pgain ch3
-		ftoa(Pgain_ch3, tx_string);
+		ftoa(ch3.Pgain, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 406:	// Send Igain ch3
-		ftoa(Igain_ch3, tx_string);
+		ftoa(ch3.Igain, tx_string);
 		printStatus(tx_string);
 		break;
 		
 		case 407:	// Send Dgain ch3
-		ftoa(Dgain_ch3, tx_string);
+		ftoa(ch3.Dgain, tx_string);
 		printStatus(tx_string);
 		break;						
 		
@@ -1139,153 +990,153 @@ static inline void SetParameter(int id)
 	switch(id)
 	{
 		// *** Channel 0 ***
-		case 150:	// TempSetPoint0
+		case 150:	// ch0.TempSetPoint
 		ParamParse(rx_string, param);
-		TempSetPoint0 = atof(param);
+		ch0.TempSetPoint = atof(param);
 		printStatus("");
 		break;
 		
 		case 151:	// SetPgainCh0
 		ParamParse(rx_string, param);
-		Pgain_ch0 = atof(param);
+		ch0.Pgain = atof(param);
 		printStatus("");
 		break;
 		
 		case 152:	// SetIgainCh0
 		ParamParse(rx_string, param);
-		Igain_ch0 = atof(param);
+		ch0.Igain = atof(param);
 		printStatus("");
 		break;
 		
-		case 153:	// SetDgain_ch0
+		case 153:	// Setch0.Dgain
 		ParamParse(rx_string, param);
-		Dgain_ch0 = atof(param);
+		ch0.Dgain = atof(param);
 		printStatus("");
 		break;	
 		
 		case 154:	// Set heater on/off ch0
 		if(rx_string[10] == '1')
 		{
-			heaterEnableCh0 = true;
+			ch0.heaterEnable = true;
 			printStatus("ON");
 		}
 		else if(rx_string[10] == '0')
 		{
-			heaterEnableCh0 = false;
+			ch0.heaterEnable = false;
 			printStatus("OFF");
 		}
 		break;	
 		
 		// *** Channel 1 ***
-		case 250:	// TempSetPoint1
+		case 250:	// ch1.TempSetPoint
 		ParamParse(rx_string, param);
-		TempSetPoint1 = atof(param);
+		ch1.TempSetPoint = atof(param);
 		printStatus("");
 		break;
 		
 		case 251:	// SetPgainCh1
 		ParamParse(rx_string, param);
-		Pgain_ch1 = atof(param);
+		ch1.Pgain = atof(param);
 		printStatus("");
 		break;
 		
 		case 252:	// SetIgainCh1
 		ParamParse(rx_string, param);
-		Igain_ch1 = atof(param);
+		ch1.Igain = atof(param);
 		printStatus("");
 		break;
 		
-		case 253:	// SetDgain_ch1
+		case 253:	// Setch1.Dgain
 		ParamParse(rx_string, param);
-		Dgain_ch1 = atof(param);
+		ch1.Dgain = atof(param);
 		printStatus("");
 		break;
 		
 		case 254:	// Set heater on/off ch1
 		if(rx_string[10] == '1')
 		{
-			heaterEnableCh1 = true;
+			ch1.heaterEnable = true;
 			printStatus("ON");
 		}
 		else if(rx_string[10] == '0')
 		{
-			heaterEnableCh1 = false;
+			ch1.heaterEnable = false;
 			printStatus("OFF");
 		}
 		break;
 		
 		// *** Channel 2 ***
-		case 350:	// TempSetPoint2
+		case 350:	// ch2.TempSetPoint
 		ParamParse(rx_string, param);
-		TempSetPoint2 = atof(param);
+		ch2.TempSetPoint = atof(param);
 		printStatus("");
 		break;
 		
 		case 351:	// SetPgainCh2
 		ParamParse(rx_string, param);
-		Pgain_ch2 = atof(param);
+		ch2.Pgain = atof(param);
 		printStatus("");
 		break;
 		
 		case 352:	// SetIgainCh2
 		ParamParse(rx_string, param);
-		Igain_ch2 = atof(param);
+		ch2.Igain = atof(param);
 		printStatus("");
 		break;
 		
-		case 353:	// SetDgain_ch2
+		case 353:	// Setch2.Dgain
 		ParamParse(rx_string, param);
-		Dgain_ch2 = atof(param);
+		ch2.Dgain = atof(param);
 		printStatus("");
 		break;
 		
 		case 354:	// Set heater on/off ch2
 		if(rx_string[10] == '1')
 		{
-			heaterEnableCh2 = true;
+			ch2.heaterEnable = true;
 			printStatus("ON");
 		}
 		else if(rx_string[10] == '0')
 		{
-			heaterEnableCh2 = false;
+			ch2.heaterEnable = false;
 			printStatus("OFF");
 		}
 		break;
 		
 		// *** Channel 4 ***
-		case 450:	// TempSetPoint3
+		case 450:	// ch3.TempSetPoint
 		ParamParse(rx_string, param);
-		TempSetPoint3 = atof(param);
+		ch3.TempSetPoint = atof(param);
 		printStatus("");
 		break;
 		
 		case 451:	// SetPgainCh3
 		ParamParse(rx_string, param);
-		Pgain_ch3 = atof(param);
+		ch3.Pgain = atof(param);
 		printStatus("");
 		break;
 		
 		case 452:	// SetIgainCh3
 		ParamParse(rx_string, param);
-		Igain_ch3 = atof(param);
+		ch3.Igain = atof(param);
 		printStatus("");
 		break;
 		
-		case 453:	// SetDgain_ch3
+		case 453:	// Setch3.Dgain
 		ParamParse(rx_string, param);
-		Dgain_ch3 = atof(param);
+		ch3.Dgain = atof(param);
 		printStatus("");
 		break;
 		
 		case 454:	// Set heater on/off ch3
 		if(rx_string[10] == '1')
 		{
-			heaterEnableCh3 = true;
+			ch3.heaterEnable = true;
 			printStatus("ON");
 		}
 		else if(rx_string[10] == '0')
 		{
-			heaterEnableCh3 = false;
+			ch3.heaterEnable = false;
 			printStatus("OFF");
 		}
 		break;						 
