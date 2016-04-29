@@ -58,6 +58,25 @@ const int Dfilter = errorHistory;
 volatile int CtrlErrorIdx = 0;
 volatile int CtrlErrorHistIdx = 1;
 
+struct channel {
+volatile float TempSetPoint;
+volatile float P;
+volatile float I;
+volatile float D;
+volatile float Control;
+volatile float Control_PID;
+volatile float Pgain;
+volatile float Igain;
+volatile float Dgain;
+volatile float TempError[errorHistory + 1];
+volatile float tempErrorWin;
+volatile int tempSettleCnt;
+volatile int tempSettleTime;
+volatile int tempStable;	
+	};
+	
+struct channel ch0;
+
 volatile float TempSetPoint0 = 0;
 volatile float P_ch0 = 0;
 volatile float I_ch0 = 0;
@@ -68,6 +87,10 @@ volatile float Pgain_ch0;
 volatile float Igain_ch0;
 volatile float Dgain_ch0;
 volatile float TempError0[errorHistory + 1];
+volatile float tempErrorWinCh0;
+volatile int tempSettleCntCh0;
+volatile int tempSettleTimeCh0;
+volatile int tempStableCh0;
 
 volatile float TempSetPoint1 = 0;
 volatile float P_ch1 = 0;
@@ -332,7 +355,6 @@ ISR(TIMER2_COMPA_vect)	// PID Controller
 {
 	sei();	// Enable nested interrupt
 	PORTD |= statusLed;
-	int D_hist;
 	
 	TempSensor0 = ReadTempSensor(1);
 	if(TempSensor0 > (float)maxAllowedTemp)					// Max temperature limit
@@ -363,7 +385,24 @@ ISR(TIMER2_COMPA_vect)	// PID Controller
 	if(abs(TempError0[0]) > integralErrorActiveWindow)
 	{
 	I_ch0 = 0;									// Avoid integral wind-up
-	}	
+	}
+	
+	if(abs(TempError0[0]) <= tempErrorWinCh0)
+	{
+		tempSettleCntCh0 ++;
+	}
+	else
+	{
+		tempSettleCntCh0 = 0;
+	}
+	if(tempSettleCntCh0 >= tempSettleTimeCh0)
+	{
+		tempStableCh0 = 1;
+	}
+	else
+	{
+		tempStableCh0 = 0;
+	}
 	
 	//*** Channel 1 ***
 	TempSensor1 = ReadTempSensor(2);
