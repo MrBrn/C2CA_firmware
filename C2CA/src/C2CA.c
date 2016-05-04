@@ -14,6 +14,7 @@
 #include "conf_uart.h"
 
 #define rx_size						30	// Command reception buffer size [byte]
+#define param_size					20	// Max parameter length [byte]
 #define maxAllowedTemp				120	// [°C]
 #define integralErrorLimit			10
 #define integralErrorActiveWindow	5	// Error outside defined window will disable integral contribution(to avoid wind-up)
@@ -54,17 +55,17 @@ volatile float Dgain;
 volatile float TempError[errorHistory + 1];
 volatile float tempErrorWin;
 volatile int tempSettleCnt;
-volatile int tempSettleTime;
+volatile uint16_t tempSettleTime;
 volatile int tempStable;
 volatile int pwmCnt;
 volatile int pwm;
 volatile bool heaterEnable;	
 	} channel;
 	
-struct channel ch0;
-struct channel ch1;
-struct channel ch2;
-struct channel ch3;
+struct channel ch0 = {0};
+struct channel ch1 = {0};
+struct channel ch2 = {0};
+struct channel ch3 = {0};
 
 const int eepromAdr_TempSetPoint0	= 0;
 const int eepromAdr_PgainCh0		= 4;
@@ -350,7 +351,7 @@ static inline void PIDctrl(channel *ch, int tempSensor)
 	ch->D_err = (ch->TempError[CtrlErrorIdx] - ch->TempError[CtrlErrorHistIdx]) * ch->Dgain; // D error
 	
 	ch->Control_PID = ch->P_err + ch->I_err + ch->D_err;
-	ch->Control = ch->Control_PID + ch->TempSetPoint * (float)0.21 - 5;
+	ch->Control = ch->Control_PID; // + ch->TempSetPoint * (float)0.21 - 5;
 	ch->pwm = (round(ch->Control));
 	
 	if(fabs(ch->TempError[CtrlErrorIdx]) > integralErrorActiveWindow)
@@ -361,7 +362,7 @@ static inline void PIDctrl(channel *ch, int tempSensor)
 	if(fabs(ch->TempError[CtrlErrorIdx]) <= ch->tempErrorWin)				// Temperature settle window
 	{
 		ch->tempSettleCnt ++;
-		if(ch->tempSettleCnt >= (ch->tempSettleTime * 61))
+		if(ch->tempSettleCnt >= (int)(ch->tempSettleTime * 61))
 		{
 			ch->tempStable = 1;
 			ch->tempSettleCnt --;
@@ -636,28 +637,28 @@ static inline void ReadParmEEPROM()
 	ch0.Igain = eeprom_read_float((float*)eepromAdr_IgainCh0);
 	ch0.Dgain = eeprom_read_float((float*)eepromAdr_DgainCh0);
 	ch0.tempErrorWin = eeprom_read_float((float*)eepromAdr_TempErrWin0);
-	ch0.tempSettleTime = eeprom_read_float((float*)eepromAdr_TSettleTime0);
+	ch0.tempSettleTime = eeprom_read_word((uint16_t*)eepromAdr_TSettleTime0);
 	
 	ch1.TempSetPoint = eeprom_read_float((float*)eepromAdr_TempSetPoint1);
 	ch1.Pgain = eeprom_read_float((float*)eepromAdr_PgainCh1);
 	ch1.Igain = eeprom_read_float((float*)eepromAdr_IgainCh1);
 	ch1.Dgain = eeprom_read_float((float*)eepromAdr_DgainCh1);
 	ch1.tempErrorWin = eeprom_read_float((float*)eepromAdr_TempErrWin1);
-	ch1.tempSettleTime = eeprom_read_float((float*)eepromAdr_TSettleTime1);	
+	ch1.tempSettleTime = eeprom_read_word((uint16_t*)eepromAdr_TSettleTime1);	
 	
 	ch2.TempSetPoint = eeprom_read_float((float*)eepromAdr_TempSetPoint2);
 	ch2.Pgain = eeprom_read_float((float*)eepromAdr_PgainCh2);
 	ch2.Igain = eeprom_read_float((float*)eepromAdr_IgainCh2);
 	ch2.Dgain = eeprom_read_float((float*)eepromAdr_DgainCh2);
 	ch2.tempErrorWin = eeprom_read_float((float*)eepromAdr_TempErrWin2);
-	ch2.tempSettleTime = eeprom_read_float((float*)eepromAdr_TSettleTime2);	
+	ch2.tempSettleTime = eeprom_read_word((uint16_t*)eepromAdr_TSettleTime2);	
 	
 	ch3.TempSetPoint = eeprom_read_float((float*)eepromAdr_TempSetPoint3);
 	ch3.Pgain = eeprom_read_float((float*)eepromAdr_PgainCh3);
 	ch3.Igain = eeprom_read_float((float*)eepromAdr_IgainCh3);
 	ch3.Dgain = eeprom_read_float((float*)eepromAdr_DgainCh3);			
 	ch3.tempErrorWin = eeprom_read_float((float*)eepromAdr_TempErrWin3);
-	ch3.tempSettleTime = eeprom_read_float((float*)eepromAdr_TSettleTime3);	
+	ch3.tempSettleTime = eeprom_read_word((uint16_t*)eepromAdr_TSettleTime3);	
 }
 
 static inline void WriteParamToEEPROM()
@@ -667,32 +668,32 @@ static inline void WriteParamToEEPROM()
 	eeprom_write_float( (float*)eepromAdr_IgainCh0, ch0.Igain );
 	eeprom_write_float( (float*)eepromAdr_DgainCh0, ch0.Dgain );
 	eeprom_write_float( (float*)eepromAdr_TempErrWin0, ch0.tempErrorWin );
-	eeprom_write_float(	(float*)eepromAdr_TSettleTime0, ch0.tempSettleTime );
+	eeprom_write_word(	(uint16_t*)eepromAdr_TSettleTime0, ch0.tempSettleTime );
 	
 	eeprom_write_float( (float*)eepromAdr_TempSetPoint1, ch1.TempSetPoint );
 	eeprom_write_float( (float*)eepromAdr_PgainCh1, ch1.Pgain );
 	eeprom_write_float( (float*)eepromAdr_IgainCh1, ch1.Igain );
 	eeprom_write_float( (float*)eepromAdr_DgainCh1, ch1.Dgain );
 	eeprom_write_float( (float*)eepromAdr_TempErrWin1, ch1.tempErrorWin );
-	eeprom_write_float(	(float*)eepromAdr_TSettleTime1, ch1.tempSettleTime );	
+	eeprom_write_word(	(uint16_t*)eepromAdr_TSettleTime1, ch1.tempSettleTime );	
 	
 	eeprom_write_float( (float*)eepromAdr_TempSetPoint2, ch2.TempSetPoint );
 	eeprom_write_float( (float*)eepromAdr_PgainCh2, ch2.Pgain );
 	eeprom_write_float( (float*)eepromAdr_IgainCh2, ch2.Igain );
 	eeprom_write_float( (float*)eepromAdr_DgainCh2, ch2.Dgain );
 	eeprom_write_float( (float*)eepromAdr_TempErrWin2, ch2.tempErrorWin );
-	eeprom_write_float(	(float*)eepromAdr_TSettleTime2, ch2.tempSettleTime );	
+	eeprom_write_word(	(uint16_t*)eepromAdr_TSettleTime2, ch2.tempSettleTime );	
 	
 	eeprom_write_float( (float*)eepromAdr_TempSetPoint3, ch3.TempSetPoint );
 	eeprom_write_float( (float*)eepromAdr_PgainCh3, ch3.Pgain );
 	eeprom_write_float( (float*)eepromAdr_IgainCh3, ch3.Igain );
 	eeprom_write_float( (float*)eepromAdr_DgainCh3, ch3.Dgain );
 	eeprom_write_float( (float*)eepromAdr_TempErrWin3, ch3.tempErrorWin );
-	eeprom_write_float(	(float*)eepromAdr_TSettleTime3, ch3.tempSettleTime );	
+	eeprom_write_word(	(uint16_t*)eepromAdr_TSettleTime3, ch3.tempSettleTime );	
 }
 
-int main(void)
-{
+int main (void)
+  {
 	char requestID[4];
 	char s_string[20] = "C2CA SA ADP 1.0";
 	char *pos;
@@ -952,8 +953,16 @@ static inline void SendParameter(int id)
 		break;
 		
 		case 210:	// Send Temperature stable status
-		itoa(ch1.tempStable, tx_string, 10);
-		printStatus(tx_string);
+		switch(ch1.tempStable)
+		{
+			case 0:
+			printStatus("0");
+			break;
+			
+			case 1:
+			printStatus("1");
+			break;
+		}
 		break;		
 		
 		// *** Channel 2 ***		
@@ -1008,8 +1017,16 @@ static inline void SendParameter(int id)
 		break;
 		
 		case 310:	// Send Temperature stable status
-		itoa(ch2.tempStable, tx_string, 10);
-		printStatus(tx_string);
+		switch(ch2.tempStable)
+		{
+			case 0:
+			printStatus("0");
+			break;
+			
+			case 1:
+			printStatus("1");
+			break;
+		}
 		break;		
 		
 		// *** Channel 3 ***
@@ -1064,9 +1081,17 @@ static inline void SendParameter(int id)
 		break;
 		
 		case 410:	// Send Temperature stable status
-		itoa(ch3.tempStable, tx_string, 10);
-		printStatus(tx_string);
-		break;							
+		switch(ch3.tempStable)
+		{
+			case 0:
+			printStatus("0");
+			break;
+			
+			case 1:
+			printStatus("1");
+			break;
+		}
+		break;		
 		
 		default:
 		printStatus("VRerror");
@@ -1075,7 +1100,7 @@ static inline void SendParameter(int id)
 
 static inline void SetParameter(int id)
 {
-	char param[20];
+	char param[param_size];
 	
 	switch(id)
 	{
@@ -1167,6 +1192,18 @@ static inline void SetParameter(int id)
 		}
 		break;
 		
+		case 255:	// Set Temperature error window
+		ParamParse(rx_string, param);
+		ch1.tempErrorWin = atof(param);
+		printStatus("");
+		break;
+
+		case 256:	// Set Temperature Settle time
+		ParamParse(rx_string, param);
+		ch1.tempSettleTime = atoi(param);
+		printStatus("");
+		break;		
+		
 		// *** Channel 2 ***
 		case 350:	// ch2.TempSetPoint
 		ParamParse(rx_string, param);
@@ -1205,6 +1242,18 @@ static inline void SetParameter(int id)
 		}
 		break;
 		
+		case 355:	// Set Temperature error window
+		ParamParse(rx_string, param);
+		ch2.tempErrorWin = atof(param);
+		printStatus("");
+		break;
+
+		case 356:	// Set Temperature Settle time
+		ParamParse(rx_string, param);
+		ch2.tempSettleTime = atoi(param);
+		printStatus("");
+		break;		
+		
 		// *** Channel 4 ***
 		case 450:	// ch3.TempSetPoint
 		ParamParse(rx_string, param);
@@ -1242,6 +1291,18 @@ static inline void SetParameter(int id)
 			printStatus("OFF");
 		}
 		break;						 
+		
+		case 455:	// Set Temperature error window
+		ParamParse(rx_string, param);
+		ch3.tempErrorWin = atof(param);
+		printStatus("");
+		break;
+
+		case 456:	// Set Temperature Settle time
+		ParamParse(rx_string, param);
+		ch3.tempSettleTime = atoi(param);
+		printStatus("");
+		break;		
 
 		case 500: // Store param to EEPROM
 		WriteParamToEEPROM();
@@ -1257,12 +1318,17 @@ static inline void ParamParse(char *stringToParse, char *param)
 {
 	int s_len = strnlen(stringToParse, rx_size) - 5;
 	int idx = 0;
+
+	for(int i = 0; i < param_size; i++)
+	{
+		param[i] = '\0';
+	}
 		
-	for(int i = 10; i < s_len; i++)
+	for(int i = 10; i < s_len; i++)	// Position 10 in rx_string is parameter location start
 	{
 		param[idx] = stringToParse[i];
 		idx ++;
-	}	
+	}
 }
 
 static inline int GenCrc16(char c[], int nByte)	// CRC-CCITT (XModem)
