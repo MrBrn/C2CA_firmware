@@ -10,7 +10,7 @@
 #include <avr/eeprom.h>
 
 // set the correct BAUD and F_CPU defines before including setbaud.h
-#include "conf_clock.h"			// F_CPU and prescalerp settings
+#include "conf_clock.h"			// F_CPU and prescaler settings
 #include "conf_uart.h"
 
 #define rx_size						30	// Command reception buffer size [byte]
@@ -19,6 +19,9 @@
 #define integralErrorLimit			10
 #define integralErrorActiveWindow	5	// Error outside defined window will disable integral contribution(to avoid wind-up)
 #define allHeaterOff				0b11110000
+#define fullSpeedRampSize			32	// Number of ramp speed 
+#define rampAdvance					80	// Number of stepmotor IRQ until to advance in rampSpeed
+#define closeHomingSpeed			1000; 
 
 #define BUFFER_SIZE 255			// UART buffer size
 
@@ -101,6 +104,55 @@ char requestCmd[3];
 char setCmd[3];
 char rx_string[30];
 char crc[5];
+
+volatile long motorPos = 0;
+volatile long targetMotorPos = 0;
+
+enum ramp { 
+up, down, 
+homingCW, backFromHomingCW, finalHomingCW,
+homingCCW, backFromHomingCCW, finalHomingCCW };
+char ramp = up;
+volatile int speedRampPos = 0;
+volatile int speedRampInc = 0;
+volatile int speedRampSize = 0;
+volatile int motorSpeed = 10;
+const int speedRamp[fullSpeedRampSize + 1] = {
+778	,
+773	,
+768	,
+761	,
+753	,
+744	,
+733	,
+721	,
+706	,
+689	,
+669	,
+647	,
+622	,
+594	,
+564	,
+532	,
+498	,
+463	,
+426	,
+390	,
+355	,
+321	,
+289	,
+259	,
+231	,
+206	,
+184	,
+164	,
+147	,
+132	,
+120	,
+109	,
+100
+
+};
 
 // Prototypes
 static inline void SetHeaterOutputON(uint8_t ch);
@@ -227,12 +279,18 @@ static inline bool uart_char_waiting(void)
 
 static inline void TimerInit(void)
 {
-	// Timer0 PWM output
+	// Timer0 Heater PWM output
 	TIMSK0 = _BV(OCIE0A);				// Enable Interrupt TimerCounter0 Compare Match A (TIMER0_COMPA_vect)
 	TCCR0A = _BV(WGM01);				// Mode = CTC (Clear Timer on Compare)
 	TCCR0B = _BV(CS02) | _BV(CS00);		// 16MHz/1024, 0.000064 seconds per tick
 	OCR0A = 16;							// TIMER0_COMPA_vect will be triggered each 0.000064 x 16 = 0.001024 s (976.5 Hz)
-
+	
+	// Timer 1 Step motor output
+	TIMSK1 = _BV(OCIE1A);				// Enable Interrupt TimerCounter1-16Bit Compare Match A (TIMER1_COMPA_vect)
+	TCCR1B = _BV(WGM12) | _BV(WGM13) | _BV(CS11);// | _BV(CS10); // Mode = CTC (Clear Timer on Compare), 16MHz/1024, 0.000064 seconds per tick
+	ICR1 = 300;							// TIMER1_COMPA_vecr will be called every timer reach the 16-bit value int ICR1
+	int dummy = ICR1;
+	
 	// Timer2 PID controller	
 	TIMSK2 = _BV(OCIE2A);				// Enable Interrupt TimerCounter2 Compare Match A (TIMER2_COMPA_vect)
 	TCCR2A = _BV(WGM21);				// Mode = CTC (Clear Timer on Compare)
@@ -242,7 +300,7 @@ static inline void TimerInit(void)
 	sei();
 }
 
-ISR(TIMER0_COMPA_vect)	// PWM output Irq
+ISR(TIMER0_COMPA_vect)	// Heater PWM output Irq
 {
 	ch0.pwmCnt++;
 	if(ch0.pwmCnt < ch0.pwm )
@@ -300,6 +358,128 @@ ISR(TIMER0_COMPA_vect)	// PWM output Irq
 		ch3.pwmCnt = 0;
 	}
 
+}
+
+ISR(TIMER1_COMPA_vect)	// Step motor output Irq
+{
+	switch(ramp)
+	{
+		case up:
+			speedRampInc++;
+			if (speedRampInc > rampAdvance)
+			{
+				speedRampInc = 0;
+				if (speedRampPos < speedRampSize)
+				{
+					ICR1 = speedRamp[speedRampPos] * motorSpeed;
+					int dummy = ICR1;
+					speedRampPos ++;
+				}
+				else
+				{
+					ramp = down;
+					speedRampPos --;
+				}
+			}
+		break;
+				
+		case down:
+			if (labs(targetMotorPos - motorPos) < (long)(rampAdvance * speedRampSize))
+			{
+				speedRampInc++;
+				if (speedRampInc > rampAdvance)
+				{
+					speedRampInc = 0;
+					if (speedRampPos > -1)
+					{
+						ICR1 = speedRamp[speedRampPos] * motorSpeed;
+						int dummy = ICR1;
+						speedRampPos --;
+					}
+				}
+			}
+		break;
+		
+		case homingCW:
+			if((PINB & 0x01) == 0)
+			{
+				ICR1 = closeHomingSpeed;
+				int dummy = ICR1;
+				targetMotorPos = motorPos - 300;
+				ramp = backFromHomingCW;
+			}
+			else
+			{
+				targetMotorPos += 2;
+			}
+		break;
+		
+		case backFromHomingCW:
+			if (motorPos - targetMotorPos == 2)
+			{
+				ramp = finalHomingCW;
+				targetMotorPos = motorPos + 400;
+			}		
+		break;
+		
+		case finalHomingCW:
+			if((PINB & 0x01) == 0)
+			{
+				motorPos = 0;
+				targetMotorPos = 0;
+			}
+		break;
+		
+		case homingCCW:
+		if((PINB & 0x01) == 0)
+		{
+			ICR1 = closeHomingSpeed;
+			int dummy = ICR1;
+			targetMotorPos = motorPos + 300;
+			ramp = backFromHomingCCW;
+		}
+		else
+		{
+			targetMotorPos -= 2;
+		}
+		break;
+		
+		case backFromHomingCCW:
+		if (targetMotorPos - motorPos == 2)
+		{
+			ramp = finalHomingCCW;
+			targetMotorPos = motorPos - 400;
+		}
+		break;
+		
+		case finalHomingCCW:
+		if((PINB & 0x01) == 0)
+		{
+			motorPos = 0;
+			targetMotorPos = 0;
+		}
+		break;		
+	}
+	
+	if (motorPos < targetMotorPos)
+	{
+		PORTB |= 0b00000100;
+		PORTB ^= 0b00000010;
+		motorPos ++;
+	}
+	if (motorPos > targetMotorPos)
+	{
+		PORTB &= 0b11111011;
+		PORTB ^= 0b00000010;
+		motorPos --;
+	}
+
+	if (motorPos == targetMotorPos)
+	{
+		PORTB &= 0b11111101;
+		TIMSK1 -= _BV(OCIE1A);		// Disable IRQ when motor has reached target pos.
+		speedRampPos = 0;
+	}
 }
 
 ISR(TIMER2_COMPA_vect)	// PID Controller Irq
@@ -610,24 +790,25 @@ static inline void MAX31865initAuto(uint8_t ch)
 	MaxRTDinit(0xC3, ch);
 }
 
-static inline void StepperCV(int step, bool direction)
+static inline long MotorStepper(long step)
 {
-	volatile int i;
-	switch (direction)
+	volatile long i;
+	if(step > 0)
 	{
-		case true:
 		PORTB |= 0b00000100;
-		break;
-		
-		case false:
-		PORTB &= 0b11111011;
-		break;
 	}
+	else
+	{
+		PORTB &= 0b11111011;
+		step = abs(step);
+	}
+	
 	for (i = 0; i < step; i++)
 	{
 		PORTB ^= 0b00000010;
-		delay_us(10);
+		delay_us(100);
 	}
+	return step;
 }
 
 static inline void ReadParmEEPROM()
@@ -714,6 +895,7 @@ int main (void)
 	DDRD = 0b11111000;			// 1 = output 0 = input
 	DDRC = 0b00001111;
 	DDRB |= (1<<PORTB1);		// Set stepper Dir to output
+	//DDRB -= _BV(PORTB0);		// Set home switch to input
 	
 	PORTD |=(1<<PORTD7)|(1<<PORTD6)|(1<<PORTD5)|(1<<PORTD4);	// Set initially all CS high
 	
@@ -1091,7 +1273,17 @@ static inline void SendParameter(int id)
 			printStatus("1");
 			break;
 		}
-		break;		
+		break;
+		
+		case 601:	// Send motor position		
+		ltoa(motorPos, tx_string, 10);
+		printStatus(tx_string);
+		break;
+		
+		case 602:	// Send current motor speed
+		itoa(motorSpeed, tx_string, 10);
+		printStatus(tx_string);
+		break;
 		
 		default:
 		printStatus("VRerror");
@@ -1306,6 +1498,53 @@ static inline void SetParameter(int id)
 
 		case 500: // Store param to EEPROM
 		WriteParamToEEPROM();
+		printStatus("");
+		break;
+		
+		case 600: // Motor homing
+		ParamParse(rx_string, param);
+		if (strcmp(param, "CW") == 0)
+		{
+			ramp = homingCW;
+			TIMSK1 |= _BV(OCIE1A);	// Enable step motor irq
+		}
+		else if (strcmp(param, "CCW") == 0)
+		{
+			ramp = homingCCW;
+			TIMSK1 |= _BV(OCIE1A);	// Enable step motor irq
+		}
+		printStatus("");
+		break;
+		
+		case 601: // Set motor speed
+		ParamParse(rx_string, param);
+		motorSpeed = atoi(param);
+		printStatus("");
+		break;
+		
+		case 602: // Motor delta move
+		ParamParse(rx_string, param);
+		ramp = up;
+		long deltaMove = atol(param);
+		long halfDeltaMove = abs(deltaMove);
+		halfDeltaMove = halfDeltaMove >> 1;
+		if (halfDeltaMove < (fullSpeedRampSize * rampAdvance))
+		{
+			for(int idx = 1; idx < fullSpeedRampSize; idx++)
+			{
+				if (halfDeltaMove < (long)(rampAdvance * idx))
+				{
+					speedRampSize = idx - 1;
+					break;	
+				}
+			}
+		}
+		else
+		{
+			speedRampSize = fullSpeedRampSize;
+		}
+		targetMotorPos = motorPos + deltaMove;
+		TIMSK1 |= _BV(OCIE1A);
 		printStatus("");
 		break;
 		
