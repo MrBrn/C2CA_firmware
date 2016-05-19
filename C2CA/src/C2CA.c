@@ -13,15 +13,19 @@
 #include "conf_clock.h"			// F_CPU and prescaler settings
 #include "conf_uart.h"
 
-#define rx_size						30	// Command reception buffer size [byte]
-#define param_size					20	// Max parameter length [byte]
-#define maxAllowedTemp				120	// [°C]
-#define integralErrorLimit			10
-#define integralErrorActiveWindow	5	// Error outside defined window will disable integral contribution(to avoid wind-up)
+#define rx_size						30		// Command reception buffer size [byte]
+#define param_size					20		// Max parameter length [byte]
+#define maxAllowedTemp				120		// [°C]
+#define integralErrorLimit			20		// Maximal allowed integral error limit
+#define integralErrorActiveWindow	5		// Error outside defined window will disable integral contribution(to avoid wind-up)
+#define errorHistory				10		//
 #define allHeaterOff				0b11110000
-#define fullSpeedRampSize			32	// Number of ramp speed 
-#define rampAdvance					80	// Number of stepmotor IRQ until to advance in rampSpeed
-#define closeHomingSpeed			1000; 
+#define fullSpeedRampSize			32		// Number of ramp speed 
+#define rampAdvance					80		// Number of step motor IRQ until to advance in rampSpeed
+#define coarseHomingSpeed			300		// Coarse homing speed for decrease homing time
+#define nearHomingSpeed				1000	// Near field home switch speed
+#define retardDistFromHoming		6400/2	// Retard distance from first home switch hit [uSteps](full steps / 16)
+#define lowestSpeedSetting			10		// Lowest step motor speed factor(the value is multiplied with the ramp values)
 
 #define BUFFER_SIZE 255			// UART buffer size
 
@@ -39,10 +43,11 @@
 uint8_t out_buffer[BUFFER_SIZE];
 uint8_t in_buffer[BUFFER_SIZE];
 
-#define errorHistory	10
 const int Dfilter = errorHistory;
 volatile int CtrlErrorIdx = 0;
 volatile int CtrlErrorHistIdx = 1;
+
+volatile bool disableCRC = false;
 
 typedef struct channel {
 volatile float TempSetPoint;
@@ -101,7 +106,7 @@ const int eepromAdr_TSettleTime3	= 92;
 const char statusLed = 0b00001000;
 
 char requestCmd[3];
-char setCmd[3];
+char setCmd[4];
 char rx_string[30];
 char crc[5];
 
@@ -113,6 +118,7 @@ up, down,
 homingCW, backFromHomingCW, finalHomingCW,
 homingCCW, backFromHomingCCW, finalHomingCCW };
 char ramp = up;
+volatile int homeSwitch = 0;
 volatile int speedRampPos = 0;
 volatile int speedRampInc = 0;
 volatile int speedRampSize = 0;
@@ -151,7 +157,6 @@ const int speedRamp[fullSpeedRampSize + 1] = {
 120	,
 109	,
 100
-
 };
 
 // Prototypes
@@ -166,6 +171,7 @@ static inline bool CrcCompare(char *crc_in, char *crc_calc);
 static inline void ReadParmEEPROM(void);
 static inline void WriteParamToEEPROM(void);
 static inline void PIDctrl(channel *ch, int tempSensor);
+static inline void DeltaMove(long deltaDist);
 
 struct ring_buffer ring_buffer_out;		//! ring buffer to use for the UART transmission
 struct ring_buffer ring_buffer_in;		//! ring buffer to use for the UART reception
@@ -287,7 +293,7 @@ static inline void TimerInit(void)
 	
 	// Timer 1 Step motor output
 	TIMSK1 = _BV(OCIE1A);				// Enable Interrupt TimerCounter1-16Bit Compare Match A (TIMER1_COMPA_vect)
-	TCCR1B = _BV(WGM12) | _BV(WGM13) | _BV(CS11);// | _BV(CS10); // Mode = CTC (Clear Timer on Compare), 16MHz/1024, 0.000064 seconds per tick
+	TCCR1B = _BV(WGM12) | _BV(WGM13) | _BV(CS11);// | _BV(CS10); // Mode = CTC (Clear Timer on Compare), 16MHz/8
 	ICR1 = 300;							// TIMER1_COMPA_vecr will be called every timer reach the 16-bit value int ICR1
 	int dummy = ICR1;
 	
@@ -403,9 +409,9 @@ ISR(TIMER1_COMPA_vect)	// Step motor output Irq
 		case homingCW:
 			if((PINB & 0x01) == 0)
 			{
-				ICR1 = closeHomingSpeed;
+				ICR1 = nearHomingSpeed;
 				int dummy = ICR1;
-				targetMotorPos = motorPos - 300;
+				targetMotorPos = motorPos - retardDistFromHoming;
 				ramp = backFromHomingCW;
 			}
 			else
@@ -418,7 +424,7 @@ ISR(TIMER1_COMPA_vect)	// Step motor output Irq
 			if (motorPos - targetMotorPos == 2)
 			{
 				ramp = finalHomingCW;
-				targetMotorPos = motorPos + 400;
+				targetMotorPos = motorPos + retardDistFromHoming + 100;
 			}		
 		break;
 		
@@ -433,9 +439,9 @@ ISR(TIMER1_COMPA_vect)	// Step motor output Irq
 		case homingCCW:
 		if((PINB & 0x01) == 0)
 		{
-			ICR1 = closeHomingSpeed;
+			ICR1 = nearHomingSpeed;
 			int dummy = ICR1;
-			targetMotorPos = motorPos + 300;
+			targetMotorPos = motorPos + retardDistFromHoming;
 			ramp = backFromHomingCCW;
 		}
 		else
@@ -446,9 +452,9 @@ ISR(TIMER1_COMPA_vect)	// Step motor output Irq
 		
 		case backFromHomingCCW:
 		if (targetMotorPos - motorPos == 2)
-		{
+		{	
 			ramp = finalHomingCCW;
-			targetMotorPos = motorPos - 400;
+			targetMotorPos = motorPos - retardDistFromHoming - 100;
 		}
 		break;
 		
@@ -480,6 +486,8 @@ ISR(TIMER1_COMPA_vect)	// Step motor output Irq
 		TIMSK1 -= _BV(OCIE1A);		// Disable IRQ when motor has reached target pos.
 		speedRampPos = 0;
 	}
+	
+	homeSwitch = (int)(PINB & 0x01);
 }
 
 ISR(TIMER2_COMPA_vect)	// PID Controller Irq
@@ -882,6 +890,7 @@ int main (void)
 	int i;
 	int var;
 	
+	disableCRC = false;
 	cli();
 	uart_init();
 	sei();
@@ -949,7 +958,6 @@ int main (void)
 					else
 					{
 						printStatus("CRC error");
-						//printStatus(rx_string);
 					}
 				}
 					
@@ -972,9 +980,9 @@ int main (void)
 					else
 					{
 						printStatus("CRC error");
-						//printStatus(rx_string);
 					}
 				}
+				continue;
 			}	
 			
 			pos = NULL;
@@ -1004,13 +1012,27 @@ int main (void)
 					else
 					{
 						printStatus("CRC error");
-						//printStatus(rx_string);
 					} 
 				}
+				continue;
 			}
+			
+			pos = NULL;									
+			pos = strchr(rx_string, '$');				// Unique character and cmd to turn CRC off
+			if(pos != NULL)
+			{	
+				setCmd[0] = *(pos + 1);					// Parse set command
+				setCmd[1] = *(pos + 2);
+				setCmd[2] = *(pos + 3);
+				
+				if(strcmp(setCmd, "CRC") == 0)
+				{	
+					disableCRC = true;
+					printStatus("CRC disabled");
+				}
+			}			
 		}
 	}
-
 }
 
 static inline void SendParameter(int id)
@@ -1275,6 +1297,19 @@ static inline void SendParameter(int id)
 		}
 		break;
 		
+		case 600:	// Send home switch status
+		switch(homeSwitch)
+		{
+			case 0:
+			printStatus("0");
+			break;
+			
+			case 1:
+			printStatus("1");
+			break;
+		}
+		break;
+		
 		case 601:	// Send motor position		
 		ltoa(motorPos, tx_string, 10);
 		printStatus(tx_string);
@@ -1506,11 +1541,15 @@ static inline void SetParameter(int id)
 		if (strcmp(param, "CW") == 0)
 		{
 			ramp = homingCW;
+			ICR1 = coarseHomingSpeed;
+			int dummy = ICR1;
 			TIMSK1 |= _BV(OCIE1A);	// Enable step motor irq
 		}
 		else if (strcmp(param, "CCW") == 0)
 		{
 			ramp = homingCCW;
+			ICR1 = coarseHomingSpeed;
+			int dummy = ICR1;
 			TIMSK1 |= _BV(OCIE1A);	// Enable step motor irq
 		}
 		printStatus("");
@@ -1518,33 +1557,44 @@ static inline void SetParameter(int id)
 		
 		case 601: // Set motor speed
 		ParamParse(rx_string, param);
-		motorSpeed = atoi(param);
+		int motorSpeedTemp = atoi(param);
+		if (motorSpeedTemp < 1)
+		{
+			motorSpeed = 1;
+		}
+		if (motorSpeedTemp > lowestSpeedSetting)
+		{
+			motorSpeed = lowestSpeedSetting;
+		}
+		else
+		{
+			motorSpeed = (lowestSpeedSetting + 1) - motorSpeedTemp;
+		}
 		printStatus("");
 		break;
 		
 		case 602: // Motor delta move
 		ParamParse(rx_string, param);
 		ramp = up;
-		long deltaMove = atol(param);
-		long halfDeltaMove = abs(deltaMove);
-		halfDeltaMove = halfDeltaMove >> 1;
-		if (halfDeltaMove < (fullSpeedRampSize * rampAdvance))
+		DeltaMove(atol(param));
+		printStatus("");
+		break;
+		
+		case 603: // Motor abs move
+		ParamParse(rx_string, param);
+		long absPos = atol(param);
+		if(absPos > motorPos)
 		{
-			for(int idx = 1; idx < fullSpeedRampSize; idx++)
-			{
-				if (halfDeltaMove < (long)(rampAdvance * idx))
-				{
-					speedRampSize = idx - 1;
-					break;	
-				}
-			}
+			long deltaDist = absPos - motorPos;
+			ramp = up;
+			DeltaMove(deltaDist);
 		}
-		else
+		else if (absPos < motorPos)
 		{
-			speedRampSize = fullSpeedRampSize;
+			long deltaDist = absPos - motorPos;
+			ramp = up;
+			DeltaMove(deltaDist);
 		}
-		targetMotorPos = motorPos + deltaMove;
-		TIMSK1 |= _BV(OCIE1A);
 		printStatus("");
 		break;
 		
@@ -1606,6 +1656,11 @@ static inline bool CrcCompare(char *crc_in, char *crc_calc)
 	strupr(crc_in);
 	strupr(crc_calc);
 	
+	if(disableCRC == true)
+	{
+		return true;	
+	}
+	
 	if(crc_in[0] == '0' && crc_in[1] == '0' && crc_in[2] == '0')
 	{
 			if(crc_in[3] == crc_calc[0])
@@ -1654,4 +1709,27 @@ static inline bool CrcCompare(char *crc_in, char *crc_calc)
 				return false;
 			}
 	}
+}
+
+static inline void DeltaMove(long deltaDist)
+{
+	long halfDeltaMove = labs(deltaDist);
+	halfDeltaMove = halfDeltaMove >> 1;
+	if (halfDeltaMove < (fullSpeedRampSize * rampAdvance))
+	{
+		for(int idx = 1; idx < fullSpeedRampSize; idx++)
+		{
+			if (halfDeltaMove < (long)(rampAdvance * idx))
+			{
+				speedRampSize = idx - 1;
+				break;
+			}
+		}
+	}
+	else
+	{
+		speedRampSize = fullSpeedRampSize;
+	}
+	targetMotorPos = motorPos + deltaDist;
+	TIMSK1 |= _BV(OCIE1A);
 }
